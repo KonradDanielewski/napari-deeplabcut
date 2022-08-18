@@ -1,10 +1,16 @@
 from collections import defaultdict
+import gc
+import os
 from types import MethodType
 from typing import Optional, Sequence, Union
 
 import napari
 import numpy as np
-from napari.layers import Image, Points
+import pandas as pd
+
+import re
+
+from napari.layers import Image, Points, Shapes
 from napari.layers.points._points_key_bindings import register_points_action
 from napari.layers.utils import color_manager
 from napari.utils.events import Event
@@ -201,6 +207,7 @@ class KeypointControls(QWidget):
 
     def on_insert(self, event):
         layer = event.source[-1]
+            
         if isinstance(layer, Image):
             paths = layer.metadata.get("paths")
             if paths is None:
@@ -247,12 +254,32 @@ class KeypointControls(QWidget):
             layer.events.data.connect(self.update_data)
             if not self._menus:
                 self._form_dropdown_menus(store)
+            # adding layer for epipolar lines
+            # TODO this should only happen when more than one camera
+            # so should be moved somewhere else
+            self.help_layer = self.viewer.add_shapes(np.empty((0, 0, 2)), name="Help lines")
+                        
+            # attaching extrinsic calibration to KeypointControls
+            if self.viewer.title.__contains__("Camera "):
+                self.help_layer.metadata["viewers"] = self._multiview_controls._viewers
+                self.help_layer.metadata["camera_number"] = int(re.findall(r'\d+',self.viewer.title)[-1])
+                self.help_layer.metadata["calibration_type"] ="unknown"
+                self.help_layer.metadata["extrinsic_calibration_coefficients"] = []
+                self.help_layer.metadata["point_layer"] = layer
+                for file in os.listdir(layer.metadata["root"]):
+                    if file.__contains__("dltCoefs.csv"):
+                        self.help_layer.metadata["calibration_type"] = "DLTdv"
+                        self.help_layer.metadata["extrinsic_calibration_coefficients"] = pd.read_csv(
+                            os.path.join(layer.metadata["root"],
+                            file), header=None).values[:, self.help_layer.metadata["camera_number"]-1]
+
         for layer_ in self.viewer.layers:
             if not isinstance(layer_, Image):
                 self._remap_frame_indices(layer_)
 
     def update_data(self, event):
-        self._multiview_controls._update_viewers_data(event.value)
+        self._multiview_controls._update_viewers_data(event.value, event.source)
+        #self._multiview_controls._update_viewers_data(event.value, event.source, self.viewer)
 
     def on_remove(self, event):
         layer = event.value
@@ -265,6 +292,9 @@ class KeypointControls(QWidget):
                 menu.destroy()
         elif isinstance(layer, Image):
             self._images_meta = dict()
+
+    def on_move(self, event):
+        print("moved")
 
     @register_points_action("Change labeling mode")
     def cycle_through_label_modes(self, *args):
@@ -411,23 +441,202 @@ class MultiViewControls(QWidget):
         for i in range(n - 1):
             viewer = napari.Viewer(title=f"Camera {i + 2}")
             # Auto activate plugin
-            action = viewer.window.plugins_menu.actions()[-1]
-            action.trigger()
+            for action in viewer.window.plugins_menu.actions():
+                if str(action.text()).__contains__("napari-deeplabcut"):
+                    action.trigger()
             self._viewers.append(viewer)
         for n, viewer in enumerate(self._viewers):
             viewer.window.resize(self._half_w, self._half_h)
             viewer.window._qt_window.move(*self._pos[n % 4])
             viewer.dims.events.current_step.connect(self._update_viewers)
+            viewer.dims.events.current_step.connect(self._update_viewers)
+        # dirty hack to get the MultiViewControls of the newly launched viewers
+        for object in gc.get_objects():
+            if isinstance(object, MultiViewControls):
+                object._viewers = self._viewers
 
     def _update_viewers(self, event):
         ind = event.value[0]
         for viewer in self._viewers:
             viewer.dims.set_current_step(0, ind)
+        self._update_viewers_data(event.value, event.source)
+        
 
-    # TODO Need to update layer properties as well
-    def _update_viewers_data(self, data):
-        for viewer in self._viewers:
-            for layer in viewer.layers:
-                if isinstance(layer, Points):
-                    with layer.events.data.blocker():
-                        layer.data = data
+        # TODO Need to update layer properties as well
+    def _update_viewers_data(self, data, source):
+        
+        for i, viewer in enumerate(self._viewers):
+            for j, viewer2 in enumerate(self._viewers):
+                if j == i: continue
+                try:
+                    draw_epipolars(viewer, viewer2)
+                except:
+                    return
+        return
+
+        #if len(self._viewers)>1:
+        #    for viewer in self._viewers:
+        #        for viewer2 in self._viewers:
+        #            if viewer.title != viewer2.title and len(viewer.layers) > 2 and len(viewer2.layers) > 2:
+        #                print("")
+        #                draw_epipolars(viewer, viewer2)
+        #return
+        current_viewer = self.parent.viewer
+        current_frame = current_viewer.dims.current_step[0]+1
+        try:
+            selected_point = list(source._selected_data)[0]
+        except:
+            return
+        print("current viewer:", current_viewer.title)
+        print("current frame:", current_frame)
+
+        v = data[selected_point][1] # image y coord
+        u = data[selected_point][2] # image x coord
+
+        C1 = self.parent.help_layer.metadata["extrinsic_calibration_coefficients"]
+
+        imgx1=0
+        imgx2=2560
+        # no longer needed since we store viewers in MultiViewControls._viewers
+        #viewers = self.parent.help_layer.metadata["viewers"]
+        viewers = self._viewers
+        
+        for viewer in viewers:
+            if viewer.title == "Camera 1":
+                viewer1 = viewer
+            elif viewer.title == "Camera 2":
+                viewer2 = viewer
+        draw_epipolars(viewer1, viewer2)
+        return
+
+        for viewer in viewers:
+            print(viewer.title)
+
+        for viewer in viewers:
+            if viewer.title != current_viewer.title:
+                for layer in viewer.layers:
+                    if isinstance(layer, Shapes):
+                        C2 = layer.metadata["extrinsic_calibration_coefficients"]
+                        (m,b) = get_epipolar_line(u,v,C1,C2)
+                        imgy1=(m*imgx1+b)
+                        imgy2=(m*imgx2+b)
+                        with layer.events.data.blocker():
+                            layer.add(np.array([[imgy1, imgx1], [imgy2, imgx2]]), shape_type='line', edge_color=[0,1,0],edge_width=3)
+                #for layer in viewer.layers:
+                #    if isinstance(layer, Points):
+                #        with layer.events.data.blocker():
+                #            layer.data[selected_point] = data[selected_point]
+                #            layer.refresh()
+
+def invdlt(A,XYZ):
+
+    X=XYZ[0]
+    Y=XYZ[1]
+    Z=XYZ[2]
+
+    x=np.divide((X*A[0]+Y*A[1]+Z*A[2]+A[3]),(X*A[8]+Y*A[9]+Z*A[10]+1))
+    y=np.divide((X*A[4]+Y*A[5]+Z*A[6]+A[7]),(X*A[8]+Y*A[9]+Z*A[10]+1))
+
+    return x, y
+
+def get_epipolar_line(u1,v1,C1,C2):
+    '''This function is based on the partialdlt which is a MATLAB function
+    written by Ty Hedrick and included with DLTdv (https://github.com/tlhedrick/dltdv)
+    
+    It takes the image coordinates for a point in View 1 (u,v) and the extrinsic calibration
+    coefficients from both cameras/views (C1 and C2) as input.
+
+    Note that u is the horizontal coordinate (x) and v the vertical (y)
+
+    It then calculates an epipolar line for View 2 as a straight line with slope m and
+    Y-intercept b.
+
+    '''
+    
+    z=[500,-500] # Two random z values
+
+    #pre-alocate x and y
+    y = [0, 0] # could do np.zeros(2).tolist() or withour tolist but I don't know what that would mess up
+    x = [0, 0]
+
+    # calculate the x and y coordinates in real world coordinates
+    for i in [0, 1]:
+        Z = z[i]
+        
+        # Hedricks cites MathCAD 11 for the calculation of y and x
+        y[i] =\
+            -(u1*C1[8]*C1[6]*Z + u1*C1[8]*C1[7] - u1*C1[10]*Z*C1[4] -u1*C1[4] + C1[0]*v1*C1[10]*Z\
+            + C1[0]*v1 - C1[0]*C1[6]*Z - C1[0]*C1[7] - C1[2]*Z*v1*C1[8] + C1[2]*Z*C1[4] - \
+            C1[3]*v1*C1[8] + C1[3]*C1[4]) / (u1*C1[8]*C1[5] - u1*C1[9]*C1[4] + C1[0]*v1*C1[9] - \
+            C1[0]*C1[5] - C1[1]*v1*C1[8] + C1[1]*C1[4])
+
+        Y=y[i]
+
+        x[i] = -(v1*C1[9]*Y+v1*C1[10]*Z+v1-C1[5]*Y-C1[6]*Z-C1[7])/(v1*C1[8]-C1[4])
+
+    # Calculate two image coordinates for View 2 on which to base the straight line
+    u2=[0,0]
+    v2=[0,0]
+    for i in [0,1]:
+        (u2[i],v2[i]) = invdlt(C2,np.array([x[i],y[i],z[i]]))
+    
+    # Calculate slope and Y-intercept (m and b)
+    m=(v2[1]-v2[0])/(u2[1]-u2[0])
+    b=v2[0]-m*u2[0]
+
+    return m,b
+
+def draw_epipolars(viewer1, viewer2):
+    '''
+    Draw epipolars on viewer 2 based on the point data in viewer 1
+    '''
+
+    for layer in viewer1.layers:
+                    if isinstance(layer, Shapes):
+                        help_layer1 = layer
+                    elif isinstance(layer,Points):
+                        points_layer1 = layer
+    for layer in viewer2.layers:
+                    if isinstance(layer, Shapes):
+                        help_layer2 = layer
+                    elif isinstance(layer,Image):
+                        image_layer2 = layer
+
+    frame_width2 = image_layer2.data.shape[2]
+    frame_height2 = image_layer2.data.shape[1]
+
+    C1 = help_layer1.metadata["extrinsic_calibration_coefficients"]
+    C2 = help_layer2.metadata["extrinsic_calibration_coefficients"]
+
+    current_frame = viewer1.dims.current_step[0]
+    current_point_indexes1 = points_layer1.data[:,0] == current_frame
+    current_points1 = points_layer1.data[current_point_indexes1,:][:,[1,2]]
+    current_face_colors = points_layer1.face_color[current_point_indexes1,:][:,0:3]
+
+    
+    help_layer2.data = np.empty((0, 0, 2))
+    for i, point in enumerate(current_points1):
+
+        (m,b) = get_epipolar_line(point[1],point[0],C1,C2)
+        imgx1 = 0
+        imgx2 = frame_width2             
+        imgy1=b
+        imgy2=m*frame_width2+b
+
+        if imgy1<0:
+            imgy1 = 0
+            imgx1 = -b/m
+        elif imgy1>frame_height2:
+            imgy1=frame_height2
+            imgx1=(imgy1-b)/m
+        
+        if imgy2<0:
+            imgy2 = 0
+            imgx2 = -b/m
+        elif imgy2>frame_height2:
+            imgy2=frame_height2
+            imgx2=(imgy2-b)/m
+        
+        line_color = current_face_colors[i]
+        with help_layer2.events.data.blocker():
+            help_layer2.add(np.array([[imgy1, imgx1], [imgy2, imgx2]]), shape_type='line', edge_color=line_color,edge_width=3)
