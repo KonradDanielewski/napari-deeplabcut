@@ -257,7 +257,9 @@ class KeypointControls(QWidget):
             # adding layer for epipolar lines
             # TODO this should only happen when more than one camera
             # so should be moved somewhere else
-            self.help_layer = self.viewer.add_shapes(np.empty((0, 0, 2)), name="Help lines")
+
+            # 0, 0, 3 seems to mean that the layer is 3 dimensional (x,y,framenumber), 0,0,2 makes a 2 dimensional layer
+            self.help_layer = self.viewer.add_shapes(np.empty((0, 0, 3)), name="Help lines")
                         
             # attaching extrinsic calibration to KeypointControls
             if self.viewer.title.__contains__("Camera "):
@@ -266,6 +268,7 @@ class KeypointControls(QWidget):
                 self.help_layer.metadata["calibration_type"] ="unknown"
                 self.help_layer.metadata["extrinsic_calibration_coefficients"] = []
                 self.help_layer.metadata["point_layer"] = layer
+
                 for file in os.listdir(layer.metadata["root"]):
                     if file.__contains__("dltCoefs.csv"):
                         self.help_layer.metadata["calibration_type"] = "DLTdv"
@@ -420,7 +423,10 @@ class MultiViewControls(QWidget):
         layout.addWidget(self._box)
         button = QPushButton("Open Viewers")
         button.clicked.connect(self._open_viewers)
+        epl_button = QPushButton("Draw ep lines")
+        epl_button.clicked.connect(self._initiate_ep_lines)
         layout.addWidget(button)
+        layout.addWidget(epl_button)
         self.setLayout(layout)
 
         # Grid-like positioning in screen
@@ -449,7 +455,7 @@ class MultiViewControls(QWidget):
             viewer.window.resize(self._half_w, self._half_h)
             viewer.window._qt_window.move(*self._pos[n % 4])
             viewer.dims.events.current_step.connect(self._update_viewers)
-            viewer.dims.events.current_step.connect(self._update_viewers)
+            #viewer.dims.events.current_step.connect(self._update_viewers)
         # dirty hack to get the MultiViewControls of the newly launched viewers
         for object in gc.get_objects():
             if isinstance(object, MultiViewControls):
@@ -460,19 +466,93 @@ class MultiViewControls(QWidget):
         for viewer in self._viewers:
             viewer.dims.set_current_step(0, ind)
         self._update_viewers_data(event.value, event.source)
+
+    def _initiate_ep_lines(self):
+        print("Initiating epipolar lines.")
+        viewers = self._viewers
+        current_viewer = self.parent.viewer
+        other_viewers = [x for x in viewers if not x==current_viewer]
         
+        number_of_frames = current_viewer.dims.range[0][1]
+        number_of_other_cams = len(other_viewers)
+
+        for layer in current_viewer.layers:
+            if layer.name.__contains__("CollectedData"):
+                point_layer2 = layer
+            elif layer.name.__contains__("Help lines"):
+                help_layer2 = layer
+            elif layer.name.__contains__("images"):
+                image_layer2 = layer
+        
+            frame_width2 = image_layer2.data.shape[2]
+            frame_height2 = image_layer2.data.shape[1]
+
+        bodypart_labels = self.parent._stores[point_layer2].labels
+        number_of_bodyparts = len(bodypart_labels)
+
+        #all_lines=np.zeros(number_of_other_cams,number_of_bodyparts,number_of_frames,4)
+        #layer.add(np.array([[imgy1, imgx1], [imgy2, imgx2]]), shape_type='line', edge_color=[0,1,0],edge_width=3)
+
+
+        print(number_of_frames)
+        print(type(number_of_frames))
+
+        C2 = help_layer2.metadata["extrinsic_calibration_coefficients"]
+        lines_to_add=[]
+        line_colors=[]
+        current_frame_number = current_viewer.dims.current_step[0]
+        for viewer in other_viewers:
+            print("Now doing:", viewer.title)
+            for layer in viewer.layers:
+                if layer.name.__contains__("CollectedData"):
+                    point_layer = layer
+                elif layer.name.__contains__("Help lines"):
+                    help_layer = layer
+            C1 = help_layer.metadata["extrinsic_calibration_coefficients"]
+        
+            for frame_number in range(int(number_of_frames)):
+                viewer.dims.set_current_step(0,frame_number)
+                current_colors = point_layer.face_color[[int(x)==frame_number for x in point_layer.data[:,0]]]
+                current_data = point_layer.data[[int(x)==frame_number for x in point_layer.data[:,0]]]
+                annotated_keypoints = [x[0] for x in point_layer.metadata['controls']._stores[point_layer].annotated_keypoints]
+                for i,label in enumerate(bodypart_labels):
+                    try:
+                        label_index = annotated_keypoints.index(label)
+                        [v1,u1] = current_data[label_index,[1,2]]
+                        # uv = xy image coord but order is wrong here because
+                        # convention for image data is wrong (and evil)
+                        lines_to_add.append(get_epipolar_line_shape(u1,v1,C1,C2, frame_width2, frame_height2,frame_number))
+                        line_colors.append(current_colors[label_index][0:3])
+
+                    # if label not found among annotated keypoints, do this:
+                    except:
+                        lines_to_add.append(np.array([[frame_number,0,0],[frame_number,0,0]]))
+                        line_colors.append([0,0,0])
+        print(lines_to_add)
+        viewer.dims.set_current_step(0,current_frame_number)
+        help_layer2.add(lines_to_add, shape_type='line',edge_color=line_colors,edge_width=1)
+
+            #for i, viewer in enumerate(viewers):
+            #    for j, viewer2 in enumerate(viewers):
+            #        if j == i: continue
+            #        print("First viewer:", viewer.title)
+            #        print("Second viewer:", viewer2.title)
+            #        print("**********")
+
+
+
+
 
         # TODO Need to update layer properties as well
     def _update_viewers_data(self, data, source):
-        
-        for i, viewer in enumerate(self._viewers):
-            for j, viewer2 in enumerate(self._viewers):
-                if j == i: continue
-                try:
-                    draw_epipolars(viewer, viewer2)
-                except:
-                    return
-        return
+        #for i, viewer in enumerate(self._viewers):
+        #    for j, viewer2 in enumerate(self._viewers):
+        #        if j == i: continue
+        #        try:
+        #            draw_epipolars(viewer, viewer2)
+        #        except:
+        #            return
+        #return
 
         #if len(self._viewers)>1:
         #    for viewer in self._viewers:
@@ -481,15 +561,73 @@ class MultiViewControls(QWidget):
         #                print("")
         #                draw_epipolars(viewer, viewer2)
         #return
+
         current_viewer = self.parent.viewer
-        current_frame = current_viewer.dims.current_step[0]+1
+        current_frame = current_viewer.dims.current_step[0]
         try:
             selected_point = list(source._selected_data)[0]
         except:
             return
+
+        v1 = data[selected_point][1] # image y coord
+        u1 = data[selected_point][2] # image x coord
+
         print("current viewer:", current_viewer.title)
         print("current frame:", current_frame)
+        print("selected point:", selected_point)
 
+        for layer in current_viewer.layers:
+            if layer.name.__contains__("CollectedData"):
+                point_layer = layer
+            elif layer.name.__contains__("Help lines"):
+                help_layer = layer
+        C1 = help_layer.metadata["extrinsic_calibration_coefficients"]
+        bodypart_labels = point_layer.metadata['controls']._stores[point_layer].labels
+        annotated_keypoints = [x[0] for x in point_layer.metadata['controls']._stores[point_layer].annotated_keypoints]
+        current_keypoint = annotated_keypoints[selected_point-np.argmax(point_layer.data[:,0]==current_frame)]
+        print("Current bodypart:", current_keypoint)
+        print("Bodypart index:",bodypart_labels.index(current_keypoint))
+        print("Bodypart total index:",current_frame*len(bodypart_labels)+bodypart_labels.index(current_keypoint))
+        line_index = current_frame*len(bodypart_labels)+bodypart_labels.index(current_keypoint)
+        viewers = self._viewers
+        other_viewers = [x for x in viewers if not x==current_viewer]
+        number_of_frames = current_viewer.dims.range[0][1]
+        number_of_other_cams = len(other_viewers)
+        number_of_bodyparts = len(bodypart_labels)
+        print("number_of_frames",number_of_frames)
+        print("number_of_other_cams",number_of_other_cams)
+        print("number_of_bodyparts",number_of_bodyparts)
+        print("helplines len",len(help_layer.data))
+
+        for i,viewer in enumerate(other_viewers):
+            print(viewer.title)
+            
+            for layer in viewer.layers:
+                print(layer.name)
+                print(len(viewer.layers))
+                if layer.name.__contains__("CollectedData"):
+                    point_layer2 = layer
+                elif layer.name.__contains__("Help lines"):
+                    help_layer2 = layer
+                elif layer.name.__contains__("images"):
+                    image_layer2 = layer
+                
+            frame_width2 = image_layer2.data.shape[2]
+            frame_height2 = image_layer2.data.shape[1]
+            C2 = help_layer2.metadata["extrinsic_calibration_coefficients"]
+            
+            print("current data at", line_index)
+            print(help_layer2.data[line_index])
+            print("proposed replacement:")
+            print(get_epipolar_line_shape(u1,v1,C1,C2, frame_width2, frame_height2,current_frame))
+            data_temp = help_layer2.data.copy()
+            data_temp[int(i*number_of_bodyparts*number_of_frames+line_index)] = get_epipolar_line_shape(u1,v1,C1,C2, frame_width2, frame_height2,current_frame)
+            help_layer2.data=data_temp
+
+
+
+
+        return
         v = data[selected_point][1] # image y coord
         u = data[selected_point][2] # image x coord
 
@@ -614,7 +752,7 @@ def draw_epipolars(viewer1, viewer2):
     current_face_colors = points_layer1.face_color[current_point_indexes1,:][:,0:3]
 
     
-    help_layer2.data = np.empty((0, 0, 2))
+    #help_layer2.data = np.empty((0, 0, 2))
     for i, point in enumerate(current_points1):
 
         (m,b) = get_epipolar_line(point[1],point[0],C1,C2)
@@ -640,3 +778,25 @@ def draw_epipolars(viewer1, viewer2):
         line_color = current_face_colors[i]
         with help_layer2.events.data.blocker():
             help_layer2.add(np.array([[imgy1, imgx1], [imgy2, imgx2]]), shape_type='line', edge_color=line_color,edge_width=3)
+
+def get_epipolar_line_shape(u1,v1,C1,C2, frame_width, frame_height, frame_number):
+    
+    (m,b) = get_epipolar_line(u1,v1,C1,C2)
+    imgx1 = 0
+    imgx2 = frame_width
+    imgy1=b
+    imgy2=m*frame_width+b
+    if imgy1<0:
+        imgy1 = 0
+        imgx1 = -b/m
+    elif imgy1>frame_height:
+        imgy1=frame_height
+        imgx1=(imgy1-b)/m
+    
+    if imgy2<0:
+        imgy2 = 0
+        imgx2 = -b/m
+    elif imgy2>frame_height:
+        imgy2=frame_height
+        imgx2=(imgy2-b)/m
+    return np.array([[frame_number,imgy1,imgx1],[frame_number,imgy2,imgx2]])

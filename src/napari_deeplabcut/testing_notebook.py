@@ -3,6 +3,7 @@ import napari
 from skimage import data
 import matplotlib.pyplot as plt
 from napari.layers import Image, Points, Shapes
+import numpy as np
 # %%
 viewer = napari.view_image(data.moon())
 
@@ -63,3 +64,8 @@ colors= [[0.267004   0.004874   0.329415   1.        ]
  [0.47750396 0.821444   0.31819502 1.        ]
  [0.139147   0.533812   0.555298   1.        ]
  [0.13469198 0.658636   0.517649   1.        ]]
+
+ # %%
+import napari
+viewer=napari.Viewer()
+# %%

@@ -122,7 +122,7 @@ def _populate_metadata(
         },
         "face_color_cycle": label_colors,
         "face_color": "label",
-        "face_colormap": colormap,
+        #"face_colormap": colormap,
         "edge_color": "valid",
         "edge_color_cycle": ["black", "red"],
         "edge_width": 0,
