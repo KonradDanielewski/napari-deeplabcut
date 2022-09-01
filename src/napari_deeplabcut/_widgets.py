@@ -408,7 +408,12 @@ def create_dropdown_menu(store, items, attr):
     menu.currentIndexChanged.connect(item_changed)
     return menu
 
-
+'''
+class to allow the viewers representing
+the three camera views to refer to each other
+for syncing frames, and for drawing
+epipolar lines
+'''
 class MultiViewControls(QWidget):
     def __init__(self, parent):
         super().__init__()
@@ -624,10 +629,8 @@ class MultiViewControls(QWidget):
             data_temp[int(i*number_of_bodyparts*number_of_frames+line_index)] = get_epipolar_line_shape(u1,v1,C1,C2, frame_width2, frame_height2,current_frame)
             help_layer2.data=data_temp
 
-
-
-
         return
+        # keeping the stuff beneath for now as it might include code snippets I might want later.
         v = data[selected_point][1] # image y coord
         u = data[selected_point][2] # image x coord
 
@@ -724,6 +727,7 @@ def get_epipolar_line(u1,v1,C1,C2):
 
     return m,b
 
+'''deprecated, keeping for now to steal useful code from.'''
 def draw_epipolars(viewer1, viewer2):
     '''
     Draw epipolars on viewer 2 based on the point data in viewer 1
